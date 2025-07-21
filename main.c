@@ -259,7 +259,6 @@ void draw_waveform(const float* buffer, size_t buffer_size, int x, int y, int w,
 	const float yscale = h * 0.5f;
 
 	const int step = buffer_size / SCREEN_WIDTH;
-	printf("step: %d\n", step);
 	for (int i = 0; i < (buffer_size - step*2); i += step)
 	{
 		const float x0 = (i + 0) * xscale;
@@ -290,8 +289,6 @@ int main(void)
 	const unsigned int BUFFER_LENGTH_IN_SECONDS = 60 * 10;
 	const unsigned int sample_rate = GetAudioCaptureSampleRate();
 	const unsigned int buffer_size = sample_rate * BUFFER_LENGTH_IN_SECONDS;
-
-	printf("buffer_size: %d\n", buffer_size);
 
 	AudioStream stream = LoadAudioStream(sample_rate, 32, 2);
 	PlayAudioStream(stream);
