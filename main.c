@@ -1,5 +1,3 @@
-#include "raylib.h"
-
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,12 +6,16 @@
 #include <stdint.h>
 #include <time.h>
 
+#include <raylib.h>
 #include <vorbis/vorbisenc.h>
+#include <curl/curl.h>
+#include <curl/easy.h>
 
-#define SAMPLE_RATE 48000
+//#define SAMPLE_RATE 48000
 #define CHANNEL_COUNT 2
 #define BUFFER_LENGTH_IN_SECONDS (60 * 1)
-#define BUFFER_SIZE (CHANNEL_COUNT * SAMPLE_RATE * BUFFER_LENGTH_IN_SECONDS)
+
+static unsigned int BUFFER_SIZE = 0;
 
 int write_ogg(FILE* ogg_file, const float* samples, size_t sample_count)
 {
@@ -33,7 +35,7 @@ int write_ogg(FILE* ogg_file, const float* samples, size_t sample_count)
 
     vorbis_info_init(&vi);
 
-    ret=vorbis_encode_init_vbr(&vi, 2, SAMPLE_RATE, 0.1);
+    ret=vorbis_encode_init_vbr(&vi, 2, GetAudioCaptureSampleRate(), 0.1);
 
     if (ret)
     {
@@ -188,14 +190,101 @@ int save_buffer(const float* buffer, size_t bufferHead)
     return 0;
 }
 
+struct Memory
+{
+    char *response;
+    size_t size;
+};
+
+static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp)
+{
+    size_t realsize = size * nmemb;
+    struct Memory *mem = (struct Memory *)userp;
+
+    char *ptr = realloc(mem->response, mem->size + realsize + 1);
+    if(ptr == NULL)
+        return 0;  // Out of memory
+
+    mem->response = ptr;
+    memcpy(&(mem->response[mem->size]), contents, realsize);
+    mem->size += realsize;
+    mem->response[mem->size] = 0;
+
+    return realsize;
+}
+
+int upload_recording(void)
+{
+	CURL *curl;
+    CURLcode res;
+    curl_mime *form = NULL;
+    curl_mimepart *field = NULL;
+
+	struct Memory chunk = {0};
+
+    curl_global_init(CURL_GLOBAL_ALL);
+    curl = curl_easy_init();
+
+    if(curl)
+	{
+        // Create the multipart form
+        form = curl_mime_init(curl);
+
+        // Add the file field
+        field = curl_mime_addpart(form);
+        curl_mime_name(field, "file");
+        curl_mime_filedata(field, "recording.ogg");
+
+        // Set URL and form
+        curl_easy_setopt(curl, CURLOPT_URL, "https://mixtape.place/");
+        curl_easy_setopt(curl, CURLOPT_MIMEPOST, form);
+
+		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+
+        // Perform the request
+        res = curl_easy_perform(curl);
+
+        // Check for errors
+        if(res != CURLE_OK)
+            fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        else
+            printf("File uploaded successfully.\n");
+
+        // Cleanup
+        curl_mime_free(form);
+        curl_easy_cleanup(curl);
+    }
+
+	printf("%s\n", chunk.response);
+
+	char* uploaded_name = chunk.response + 8;
+	char* quot = strchr(uploaded_name, '"');
+	assert(quot != NULL);
+	quot[0] = '\0';
+
+	char file_url[256];
+	snprintf(file_url, sizeof(file_url), "https://mixtape.place/%s", uploaded_name);
+	printf("URL: %s\n", file_url);
+
+	return 0;
+}
+
+
+
 int main(void)
 {
+	curl_global_init(CURL_GLOBAL_ALL);
+
     const int screenWidth = 800;
     const int screenHeight = 450;
 
     InitWindow(screenWidth, screenHeight, "shadowplay");
 
     InitAudioDevice();
+
+	BUFFER_SIZE = (CHANNEL_COUNT * GetAudioCaptureSampleRate() * BUFFER_LENGTH_IN_SECONDS);
+
     SetTargetFPS(60);
 
     float* buffer = calloc(BUFFER_SIZE, sizeof(float));
@@ -215,6 +304,7 @@ int main(void)
         if (IsKeyPressed(KEY_ENTER))
         {
             save_buffer(buffer, bufferHead);
+			upload_recording();
         }
 
         BeginDrawing();
@@ -242,6 +332,8 @@ int main(void)
 
     CloseAudioDevice();
     CloseWindow();
+
+	curl_global_cleanup();
 
     return 0;
 }

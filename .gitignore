@@ -1,5 +1,6 @@
 *.ogg
 .vs
+.vscode
 shadowplay/
 x64/
 *.sln
