@@ -1,0 +1,6 @@
+*.ogg
+.vs
+shadowplay/
+x64/
+*.sln
+*.vcxproj*
