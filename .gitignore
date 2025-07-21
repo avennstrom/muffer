@@ -5,3 +5,4 @@ shadowplay/
 x64/
 *.sln
 *.vcxproj*
+muffer
