@@ -5,19 +5,41 @@
 #include <assert.h>
 #include <stdint.h>
 #include <time.h>
+#include <stdbool.h>
 
 #include <raylib.h>
 #include <vorbis/vorbisenc.h>
 #include <curl/curl.h>
 #include <curl/easy.h>
 
-//#define SAMPLE_RATE 48000
-#define CHANNEL_COUNT 2
-#define BUFFER_LENGTH_IN_SECONDS (60 * 1)
+#define SCREEN_WIDTH 800
+#define SCREEN_HEIGHT 450
+#define PLAYBACK_FRAME_COUNT 4096
 
-static unsigned int BUFFER_SIZE = 0;
+struct stereo_buffer
+{
+	size_t size;
+	float* l;
+	float* r;
+};
 
-int write_ogg(FILE* ogg_file, const float* samples, size_t sample_count)
+int create_buffer(struct stereo_buffer* sb, size_t size)
+{
+	sb->size = size;
+	sb->l = calloc(size, sizeof(float));
+	sb->r = calloc(size, sizeof(float));
+	if (sb->l == NULL || sb->r == NULL)
+	{
+		free(sb->l);
+		free(sb->r);
+		sb->l = NULL;
+		sb->r = NULL;
+		return 1;
+	}
+	return 0;
+}
+
+int write_ogg(FILE* ogg_file, const struct stereo_buffer* buffer)
 {
     ogg_stream_state os; /* take physical pages, weld into a logical
                           stream of packets */
@@ -93,20 +115,15 @@ int write_ogg(FILE* ogg_file, const float* samples, size_t sample_count)
 
     while (!eos)
     {
-        int remaining = sample_count - write_pos;
+        int remaining = buffer->size - write_pos;
         if (remaining > chunk_size)
         {
             remaining = chunk_size;
         }
 
-        const float* chunk_samples = samples + write_pos * 2;
-
-        float** buffer = vorbis_analysis_buffer(&vd, remaining);
-        for (int i=0; i < remaining; ++i)
-        {
-            buffer[0][i] = chunk_samples[i*2+0];
-            buffer[1][i] = chunk_samples[i*2+1];
-        }
+        float** vorbis_buffer = vorbis_analysis_buffer(&vd, remaining);
+		memcpy(vorbis_buffer[0], buffer->l + write_pos, remaining * sizeof(float));
+		memcpy(vorbis_buffer[1], buffer->r + write_pos, remaining * sizeof(float));
 
         write_pos += remaining;
 
@@ -144,50 +161,16 @@ int write_ogg(FILE* ogg_file, const float* samples, size_t sample_count)
     return 0;
 }
 
-int save_buffer(const float* buffer, size_t bufferHead)
+void copy_buffer(struct stereo_buffer* target, struct stereo_buffer* source, size_t cursor)
 {
-    float* recording = calloc(BUFFER_SIZE, sizeof(float));
-    int16_t* recording_16 = calloc(BUFFER_SIZE, sizeof(int16_t));
+	assert(target->size == source->size);
+	const size_t size = target->size;
 
-    if (recording == NULL || recording_16 == NULL)
-    {
-        fprintf(stderr, "Out of memory.\n");
-        free(recording);
-        free(recording_16);
-        return 1;
-    }
+	memcpy(target->l, source->l + cursor, (size - cursor) * sizeof(float));
+	memcpy(target->r, source->r + cursor, (size - cursor) * sizeof(float));
 
-    memcpy(recording, buffer + bufferHead, (BUFFER_SIZE - bufferHead) * sizeof(float));
-    memcpy(recording + (BUFFER_SIZE - bufferHead), buffer, bufferHead * sizeof(float));
-
-    for (int i = 0; i < BUFFER_SIZE; ++i)
-    {
-        recording_16[i] = (int16_t)(recording[i] * (float)INT16_MAX);
-    }
-
-#if 1
-    FILE* f = fopen("recording.ogg", "wb");
-    write_ogg(f, recording, BUFFER_SIZE / 2);
-    fclose(f);
-#else
-    const Wave wave = {
-        .frameCount = BUFFER_SIZE / CHANNEL_COUNT,
-        .sampleRate = SAMPLE_RATE,
-        .sampleSize = 16,
-        .channels = CHANNEL_COUNT,
-        .data = recording_16,
-    };
-
-    const bool export_result = ExportWave(wave, "recording.wav");
-    if (!export_result)
-    {
-        fprintf(stderr, "Failed to export wav file.\n");
-    }
-#endif
-
-    free(recording);
-    free(recording_16);
-    return 0;
+    memcpy(target->l + (size - cursor), source->l, cursor * sizeof(float));
+	memcpy(target->r + (size - cursor), source->r, cursor * sizeof(float));
 }
 
 struct Memory
@@ -270,62 +253,218 @@ int upload_recording(void)
 	return 0;
 }
 
+void draw_waveform(const float* buffer, size_t buffer_size, int x, int y, int w, int h, Color color_a, Color color_b)
+{
+	const float xscale = ((float)w / buffer_size);
+	const float yscale = h * 0.5f;
 
+	const int step = buffer_size / SCREEN_WIDTH;
+	printf("step: %d\n", step);
+	for (int i = 0; i < (buffer_size - step*2); i += step)
+	{
+		const float x0 = (i + 0) * xscale;
+		const float x1 = (i + step) * xscale;
+		const float y0 = buffer[i + 0] * yscale + yscale + y;
+		const float y1 = buffer[i + step] * yscale + yscale + y;
+		DrawLine(x0, y0, x1, y1, ColorLerp(color_a, color_b, fabsf(buffer[i + 0])));
+	}
+	
+
+}
+
+void draw_buffer(const struct stereo_buffer* buffer, int x, int y, int w, int h, Color color_a, Color color_b)
+{
+	draw_waveform(buffer->l, buffer->size, x, y, w, h / 2, color_a, color_b);
+	draw_waveform(buffer->r, buffer->size, x, y + h / 2, w, h / 2, color_a, color_b);
+}
 
 int main(void)
 {
 	curl_global_init(CURL_GLOBAL_ALL);
 
-    const int screenWidth = 800;
-    const int screenHeight = 450;
-
-    InitWindow(screenWidth, screenHeight, "shadowplay");
+    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "shadowplay");
 
     InitAudioDevice();
+	SetAudioStreamBufferSizeDefault(PLAYBACK_FRAME_COUNT);
 
-	BUFFER_SIZE = (CHANNEL_COUNT * GetAudioCaptureSampleRate() * BUFFER_LENGTH_IN_SECONDS);
+	const unsigned int BUFFER_LENGTH_IN_SECONDS = 60 * 10;
+	const unsigned int sample_rate = GetAudioCaptureSampleRate();
+	const unsigned int buffer_size = sample_rate * BUFFER_LENGTH_IN_SECONDS;
+
+	printf("buffer_size: %d\n", buffer_size);
+
+	AudioStream stream = LoadAudioStream(sample_rate, 32, 2);
+	PlayAudioStream(stream);
 
     SetTargetFPS(60);
 
-    float* buffer = calloc(BUFFER_SIZE, sizeof(float));
-    if (buffer == NULL)
+    struct stereo_buffer record_buffer;
+	struct stereo_buffer edit_buffer;
+    if (create_buffer(&record_buffer, buffer_size) ||
+		create_buffer(&edit_buffer, buffer_size))
     {
         fprintf(stderr, "Out of memory.\n");
         return 1;
     }
 
-    size_t bufferHead = 0;
+    size_t record_cursor = 0;
+
+	bool is_editing = false;
+	int trim_start = 0;
+	bool is_playing = false;
+	int play_cursor = 0;
 
     while (!WindowShouldClose())
     {
-        const size_t nread = GetAudioCaptureData(buffer + bufferHead, BUFFER_SIZE - bufferHead);
-        bufferHead = (bufferHead + nread) % BUFFER_SIZE;
+		{
+			float capture_buffer[4096];
+			const unsigned int nread = GetAudioCaptureData(capture_buffer, 4096);
+			const unsigned int read_frames = nread / 2;
+			for (unsigned int i = 0; i < read_frames; ++i)
+			{
+				record_buffer.l[(record_cursor + i) % buffer_size] = capture_buffer[i * 2 + 0];
+				record_buffer.r[(record_cursor + i) % buffer_size] = capture_buffer[i * 2 + 1];
+			}
+
+			record_cursor = (record_cursor + read_frames) % buffer_size;
+		}
 
         if (IsKeyPressed(KEY_ENTER))
         {
-            save_buffer(buffer, bufferHead);
-			upload_recording();
+			if (is_editing)
+			{
+				const struct stereo_buffer trim_buffer = {
+					.size = edit_buffer.size - trim_start,
+					.l = edit_buffer.l + trim_start,
+					.r = edit_buffer.r + trim_start,
+				};
+
+				FILE* f = fopen("recording.ogg", "wb");
+				write_ogg(f, &trim_buffer);
+				fclose(f);
+
+				upload_recording();
+
+				is_playing = false;
+				is_editing = false;
+			}
+			else
+			{
+				copy_buffer(&edit_buffer, &record_buffer, record_cursor);
+
+				trim_start = 0;
+				is_editing = true;
+			}
         }
+
+		if (is_editing)
+		{
+			int move_seconds = 10;
+			if (IsKeyDown(KEY_LEFT_SHIFT))
+			{
+				move_seconds = 60;
+			}
+			else if (IsKeyDown(KEY_LEFT_CONTROL))
+			{
+				move_seconds = 1;
+			}
+
+			bool trim_changed = false;
+			if (IsKeyPressed(KEY_RIGHT))
+			{
+				trim_start += move_seconds * sample_rate;
+				trim_changed = true;
+			}
+			if (IsKeyPressed(KEY_LEFT))
+			{
+				trim_start -= move_seconds * sample_rate;
+				trim_changed = true;
+			}
+
+			if (trim_start < 0)
+				trim_start = 0;
+			if (trim_start > edit_buffer.size - sample_rate)
+				trim_start = edit_buffer.size - sample_rate;
+
+			if (IsKeyPressed(KEY_SPACE))
+			{
+				is_playing = !is_playing;
+				play_cursor = trim_start;
+			}
+
+			if (trim_changed)
+			{
+				play_cursor = trim_start;
+			}
+		}
+		
+		if (IsAudioStreamProcessed(stream) && 
+			is_playing &&
+			play_cursor < edit_buffer.size)
+		{
+			float playback_samples[PLAYBACK_FRAME_COUNT * 2];
+			
+			size_t remaining = edit_buffer.size - play_cursor;
+			if (remaining > PLAYBACK_FRAME_COUNT)
+			{
+				remaining = PLAYBACK_FRAME_COUNT;
+			}
+
+			for (int i = 0; i < remaining; ++i)
+			{
+				playback_samples[i * 2 + 0] = edit_buffer.l[play_cursor + i];
+				playback_samples[i * 2 + 1] = edit_buffer.r[play_cursor + i];
+			}
+
+			UpdateAudioStream(stream, playback_samples, remaining);
+			play_cursor += remaining;
+
+			if (play_cursor == edit_buffer.size)
+			{
+				is_playing = false;
+			}
+		}
 
         BeginDrawing();
         {
             ClearBackground(RAYWHITE);
 
             DrawLine(
-                bufferHead * ((float)screenWidth / BUFFER_SIZE), 0,
-                bufferHead * ((float)screenWidth / BUFFER_SIZE), screenHeight,
+                record_cursor * ((float)SCREEN_WIDTH / buffer_size), 0,
+                record_cursor * ((float)SCREEN_WIDTH / buffer_size), SCREEN_HEIGHT / 2,
                 RED);
 
-            const int step = 128;
-            for (int i = 0; i < (BUFFER_SIZE - step*2); i += step)
-            {
-                const float x0 = (i + 0) * ((float)screenWidth / BUFFER_SIZE);
-                const float x1 = (i + step) * ((float)screenWidth / BUFFER_SIZE);
-                const float y0 = buffer[i + 0] * 200 + 225;
-                const float y1 = buffer[i + step] * 200 + 225;
+            draw_buffer(&record_buffer, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT / 2, BLUE, SKYBLUE);
+			draw_buffer(&edit_buffer, 0, SCREEN_HEIGHT / 2, SCREEN_WIDTH, SCREEN_HEIGHT / 2, ORANGE, RED);
 
-                DrawLine(x0, y0, x1, y1, ColorLerp(GREEN, RED, fabsf(buffer[i + 0])));
-            }
+			{
+				const int trim_x = trim_start * ((float)SCREEN_WIDTH / buffer_size);
+				DrawLine(
+					trim_x, SCREEN_HEIGHT / 2,
+					trim_x, SCREEN_HEIGHT,
+					MAGENTA);
+
+				DrawRectangle(
+					trim_x, SCREEN_HEIGHT / 2,
+					SCREEN_WIDTH, SCREEN_HEIGHT / 2,
+					ColorAlpha(ORANGE, 0.1f)
+				);
+			}
+
+			if (is_playing)
+			{
+				DrawLine(
+					play_cursor * ((float)SCREEN_WIDTH / buffer_size), SCREEN_HEIGHT / 2,
+					play_cursor * ((float)SCREEN_WIDTH / buffer_size), SCREEN_HEIGHT,
+					GREEN);
+			}
+
+			if (is_editing)
+			{
+				const char* text = "!!! EDITING !!!";
+				int text_width = MeasureText(text, 42);
+				DrawText(text, SCREEN_WIDTH / 2 - text_width / 2, SCREEN_HEIGHT / 4 - 18, 42, RED);
+			}
         }
         EndDrawing();
     }
